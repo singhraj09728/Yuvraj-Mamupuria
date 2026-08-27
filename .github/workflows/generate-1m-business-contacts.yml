@@ -3,8 +3,8 @@ name: Generate 1M Worldwide Business Contacts
 on:
   push:
     branches: [master]
-    paths:
-      - '.github/workflows/generate-1m-business-contacts.yml'
+  pull_request:
+    branches: [master]
   workflow_dispatch:
 
 permissions:
@@ -22,10 +22,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
       - name: Install DuckDB
         run: python -m pip install --upgrade pip duckdb
-
       - name: Generate CSV from Overture Places
         shell: bash
         run: |
@@ -33,84 +31,50 @@ jobs:
           import duckdb
           from pathlib import Path
           import hashlib
-
-          release = '2026-07-22.0'
-          output = Path('worldwide_business_contacts_1m.csv')
-
-          con = duckdb.connect('contacts.duckdb')
-          con.execute("INSTALL httpfs")
-          con.execute("LOAD httpfs")
+          release='2026-07-22.0'
+          output=Path('worldwide_business_contacts_1m.csv')
+          con=duckdb.connect('contacts.duckdb')
+          con.execute('INSTALL httpfs')
+          con.execute('LOAD httpfs')
           con.execute("SET s3_region='us-west-2'")
           con.execute("SET temp_directory='./duckdb_tmp'")
-          con.execute("SET preserve_insertion_order=false")
-
-          source = f"s3://overturemaps-us-west-2/release/{release}/theme=places/type=place/*"
-
-          query = f"""
-          SELECT
-              id,
-              names.primary AS business_name,
-              COALESCE(basic_category, categories.primary) AS category,
-              addresses[1].freeform AS address,
-              addresses[1].locality AS city,
-              addresses[1].region AS region,
-              addresses[1].country AS country,
-              addresses[1].postcode AS postcode,
-              websites[1] AS website,
-              emails[1] AS email,
-              phones[1] AS phone,
-              socials[1] AS social_url,
-              ROUND(confidence, 4) AS confidence,
-              operating_status,
-              'Overture Maps Foundation Places {release}' AS source_dataset
+          con.execute('SET preserve_insertion_order=false')
+          source=f's3://overturemaps-us-west-2/release/{release}/theme=places/type=place/*'
+          query=f"""
+          SELECT id, names.primary AS business_name,
+                 COALESCE(basic_category, categories.primary) AS category,
+                 addresses[1].freeform AS address,
+                 addresses[1].locality AS city,
+                 addresses[1].region AS region,
+                 addresses[1].country AS country,
+                 addresses[1].postcode AS postcode,
+                 websites[1] AS website,
+                 emails[1] AS email,
+                 phones[1] AS phone,
+                 socials[1] AS social_url,
+                 ROUND(confidence,4) AS confidence,
+                 operating_status,
+                 'Overture Maps Foundation Places {release}' AS source_dataset
           FROM read_parquet('{source}', hive_partitioning=1)
-          WHERE
-              names.primary IS NOT NULL
-              AND length(trim(names.primary)) >= 2
-              AND COALESCE(confidence, 0) >= 0.80
-              AND (operating_status IS NULL OR operating_status = 'open')
-              AND (
-                  websites[1] IS NOT NULL
-                  OR emails[1] IS NOT NULL
-                  OR phones[1] IS NOT NULL
-              )
+          WHERE names.primary IS NOT NULL
+            AND length(trim(names.primary))>=2
+            AND COALESCE(confidence,0)>=0.80
+            AND (operating_status IS NULL OR operating_status='open')
+            AND (websites[1] IS NOT NULL OR emails[1] IS NOT NULL OR phones[1] IS NOT NULL)
           """
-
-          con.execute(f"""
-          COPY (
-              SELECT * FROM ({query})
-              USING SAMPLE 1000000 ROWS (reservoir, 20260827)
-          ) TO '{output.as_posix()}'
-          (HEADER, DELIMITER ',', QUOTE '"', ESCAPE '"')
-          """)
-
-          row_count = con.execute(
-              f"SELECT count(*) FROM read_csv_auto('{output.as_posix()}', header=true)"
-          ).fetchone()[0]
-          email_count, phone_count, website_count, country_count = con.execute(
-              f"""SELECT
-                    count(email), count(phone), count(website), count(DISTINCT country)
-                  FROM read_csv_auto('{output.as_posix()}', header=true)"""
-          ).fetchone()
-
-          if row_count != 1_000_000:
-              raise RuntimeError(f'Expected exactly 1,000,000 rows, got {row_count:,}')
-
-          sha = hashlib.sha256(output.read_bytes()).hexdigest()
-          summary = f'''Worldwide Business Contacts CSV\n\nRows: {row_count:,}\nWith public email: {email_count:,}\nWith public phone: {phone_count:,}\nWith website: {website_count:,}\nCountries/territories represented: {country_count:,}\nSource: Overture Maps Foundation Places {release}\nSHA256: {sha}\n\nNotes:\n- Public business/place data only.\n- No guessed emails or phone numbers.\n- Records require at least website, public email, or public phone.\n- Confidence threshold: >= 0.80.\n- Open or unknown operating status only.\n'''
-          Path('README_1M_CONTACTS.txt').write_text(summary, encoding='utf-8')
+          con.execute(f"""COPY (SELECT * FROM ({query}) USING SAMPLE 1000000 ROWS (reservoir, 20260827))
+                        TO '{output.as_posix()}' (HEADER, DELIMITER ',', QUOTE '"', ESCAPE '"')""")
+          row_count=con.execute(f"SELECT count(*) FROM read_csv_auto('{output.as_posix()}', header=true)").fetchone()[0]
+          email_count,phone_count,website_count,country_count=con.execute(f"""SELECT count(email),count(phone),count(website),count(DISTINCT country) FROM read_csv_auto('{output.as_posix()}',header=true)""").fetchone()
+          if row_count!=1_000_000: raise RuntimeError(f'Expected exactly 1,000,000 rows, got {row_count:,}')
+          sha=hashlib.sha256(output.read_bytes()).hexdigest()
+          summary=f'''Worldwide Business Contacts CSV\n\nRows: {row_count:,}\nWith public email: {email_count:,}\nWith public phone: {phone_count:,}\nWith website: {website_count:,}\nCountries/territories represented: {country_count:,}\nSource: Overture Maps Foundation Places {release}\nSHA256: {sha}\n\nPublic business/place data only; no guessed emails or phones.\n'''
+          Path('README_1M_CONTACTS.txt').write_text(summary,encoding='utf-8')
           print(summary)
           PY
           python generate.py
-
       - name: Compress CSV
         run: zip -9 worldwide_business_contacts_1m_csv.zip worldwide_business_contacts_1m.csv README_1M_CONTACTS.txt
-
-      - name: Verify output
-        run: |
-          ls -lh worldwide_business_contacts_1m.csv worldwide_business_contacts_1m_csv.zip
-          cat README_1M_CONTACTS.txt
-
       - name: Upload 1M contacts artifact
         uses: actions/upload-artifact@v4
         with:
